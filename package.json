@@ -1,0 +1,34 @@
+{
+  "name": "move-symbol-to-file",
+  "version": "0.0.4",
+  "publisher": "jiroRauwers <jairorauwers@gmail.com>",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "activationEvents": ["onCommand:extension.moveSymbolToFile"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "extension.moveSymbolToFile",
+        "title": "Move Symbol to File"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "extension.moveSymbolToFile",
+        "key": "shift+f2",
+        "when": "editorTextFocus && editorLangId == typescript"
+      }
+    ]
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/vscode": "^1.70.0",
+    "tsup": "^6.0.0"
+  },
+  "scripts": {
+    "build": "tsup src/extension.ts --format cjs --out-dir dist --external vscode"
+  }
+}
