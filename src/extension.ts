@@ -3,7 +3,7 @@ import * as path from "path";
 
 export function activate(context: vscode.ExtensionContext) {
   const disposable = vscode.commands.registerCommand(
-    "extension.moveIt",
+    "extension.move-it",
     async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
@@ -115,20 +115,147 @@ export function activate(context: vscode.ExtensionContext) {
       // Edit original document: delete and add import if needed
       await editor.edit((edit) => {
         edit.delete(textRange!);
-        if (isExported && symbolName) {
-          const origDir = path.dirname(document.uri.fsPath);
-          let relPath = path
-            .relative(origDir, targetUri.fsPath)
-            .replace(/\\/g, "/")
-            .replace(/\.tsx?$/, "");
-          if (!relPath.startsWith(".")) relPath = "./" + relPath;
-          const importLine = `import { ${symbolName} } from '${relPath}';\n`;
-          edit.insert(new vscode.Position(0, 0), importLine);
-        }
       });
 
       await document.save();
       await targetDoc.save();
+
+      // --- NEW LOGIC: Auto-import and conditional export if needed ---
+      if (symbolName) {
+        let docText = document.getText();
+        // Remove the import we may have added earlier
+        docText = docText.replace(
+          new RegExp(`^import \{ ${symbolName} \} from .+;\n`, "m"),
+          ""
+        );
+        // Check if symbol is still used in the file
+        const symbolUsage = new RegExp(`\\b${symbolName}\\b`, "g");
+        const isUsed = symbolUsage.test(docText);
+        // Remove intermediate info popups
+        // vscode.window.showInformationMessage(
+        //   `[MoveIt] Symbol '${symbolName}' usage in original file: ${isUsed}`
+        // );
+
+        // Prepare import line
+        const origDir = path.dirname(document.uri.fsPath);
+        let relPath = path
+          .relative(origDir, targetUri.fsPath)
+          .replace(/\\/g, "/")
+          .replace(/\.tsx?$/, "");
+        if (!relPath.startsWith(".")) relPath = "./" + relPath;
+        const importLine =
+          `import { ${symbolName} } from '${relPath}';\n`.replace(/\\n/g, "\n");
+
+        // Prepare re-export line
+        const exportLine =
+          `export { ${symbolName} } from '${relPath}';\n`.replace(/\\n/g, "\n");
+        let updated = false;
+
+        // Update import if used
+        if (isUsed) {
+          // Insert import at the top if not present
+          if (!/^import \{ ${symbolName} \} from .+;/m.test(docText)) {
+            docText = importLine + docText;
+            updated = true;
+            // vscode.window.showInformationMessage(
+            //   `[MoveIt] Added import for '${symbolName}' in original file.`
+            // );
+          }
+        }
+
+        // Update named exports to re-export
+        const exportRegex = new RegExp(`export\\s*\\{([^}]*)\\}`, "g");
+        let match;
+        let newDocText = docText;
+        let foundExport = false;
+        while ((match = exportRegex.exec(docText)) !== null) {
+          const names = match[1].split(",").map((s) => s.trim());
+          if (names.includes(symbolName)) {
+            foundExport = true;
+            // Remove symbol from named export
+            const filtered = names.filter((n) => n !== symbolName);
+            let replacement =
+              filtered.length > 0 ? `export { ${filtered.join(", ")} }` : "";
+            // Replace the export statement
+            newDocText = newDocText.replace(match[0], replacement);
+            // Add re-export line
+            newDocText = newDocText + exportLine;
+            updated = true;
+            // vscode.window.showInformationMessage(
+            //   `[MoveIt] Re-exported '${symbolName}' from new file.`
+            // );
+          }
+        }
+
+        if (updated) {
+          const edit = new vscode.WorkspaceEdit();
+          edit.replace(
+            document.uri,
+            new vscode.Range(0, 0, document.lineCount, 0),
+            newDocText
+          );
+          await vscode.workspace.applyEdit(edit);
+          await document.save();
+        }
+
+        // --- PATCH: Conditionally add export to moved symbol ---
+        if (isUsed) {
+          // Read target file content
+          let targetText = targetDoc.getText();
+          // Improved regex: allow for leading comments/decorators and whitespace (fixed double-escaping)
+          const declRegex = new RegExp(
+            `^[\\s\\t]*(?:(?:\/\/.*\\n)|(?:\/\\*[\\s\\S]*?\\*\/\\n)|(?:@[\\w\\(\\)\\.,\\s]*\\n))*[\\s\\t]*(interface|type|class|function)\\s+${symbolName}\\b`,
+            "m"
+          );
+          // Debug: Log if regex matches (REMOVED FOR PRODUCTION)
+          // const declMatch = targetText.match(declRegex);
+          // vscode.window.showInformationMessage(
+          //   `[MoveIt][Debug] declRegex match: ${declMatch ? declMatch[0] : 'NO MATCH'}`
+          // );
+          const exportDeclRegex = new RegExp(
+            `^\s*export\s+(interface|type|class|function)\s+${symbolName}\b`,
+            "m"
+          );
+          if (!exportDeclRegex.test(targetText)) {
+            // Add export to the declaration
+            const beforeReplace = targetText;
+            targetText = targetText.replace(
+              declRegex,
+              (match) => `export ${match.trim()}`
+            );
+            // Debug: Log if replacement changed anything (REMOVED FOR PRODUCTION)
+            // if (beforeReplace === targetText) {
+            //   vscode.window.showWarningMessage(
+            //     `[MoveIt][Debug] Replacement did NOT change targetText! Regex may not match the declaration.`
+            //   );
+            // } else {
+            //   vscode.window.showInformationMessage(
+            //     `[MoveIt][Debug] Replacement succeeded, export added.`
+            //   );
+            // }
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+              targetDoc.uri,
+              new vscode.Range(0, 0, targetDoc.lineCount, 0),
+              targetText
+            );
+            await vscode.workspace.applyEdit(edit);
+            await targetDoc.save();
+            // vscode.window.showInformationMessage(
+            //   `[MoveIt] New target file content:\n${targetText.slice(
+            //     0,
+            //     200
+            //   )}...`
+            // );
+            // vscode.window.showInformationMessage(
+            //   `[MoveIt] Added export to '${symbolName}' in target file.`
+            // );
+          }
+        }
+        // --- END PATCH ---
+      }
+      // --- END NEW LOGIC ---
+
       vscode.window.showInformationMessage(
         `Moved symbol to ${filename}${
           conflict ? " (with duplicate warning)" : ""
@@ -139,5 +266,3 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(disposable);
 }
-
-export function deactivate() {}

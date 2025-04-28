@@ -30,15 +30,14 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/extension.ts
 var extension_exports = {};
 __export(extension_exports, {
-  activate: () => activate,
-  deactivate: () => deactivate
+  activate: () => activate
 });
 module.exports = __toCommonJS(extension_exports);
 var vscode = __toESM(require("vscode"));
 var path = __toESM(require("path"));
 function activate(context) {
   const disposable = vscode.commands.registerCommand(
-    "extension.moveIt",
+    "extension.move-it",
     async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
@@ -122,18 +121,85 @@ function activate(context) {
       });
       await editor.edit((edit) => {
         edit.delete(textRange);
-        if (isExported && symbolName) {
-          const origDir = path.dirname(document.uri.fsPath);
-          let relPath = path.relative(origDir, targetUri.fsPath).replace(/\\/g, "/").replace(/\.tsx?$/, "");
-          if (!relPath.startsWith("."))
-            relPath = "./" + relPath;
-          const importLine = `import { ${symbolName} } from '${relPath}';
-`;
-          edit.insert(new vscode.Position(0, 0), importLine);
-        }
       });
       await document.save();
       await targetDoc.save();
+      if (symbolName) {
+        let docText = document.getText();
+        docText = docText.replace(
+          new RegExp(`^import { ${symbolName} } from .+;
+`, "m"),
+          ""
+        );
+        const symbolUsage = new RegExp(`\\b${symbolName}\\b`, "g");
+        const isUsed = symbolUsage.test(docText);
+        const origDir = path.dirname(document.uri.fsPath);
+        let relPath = path.relative(origDir, targetUri.fsPath).replace(/\\/g, "/").replace(/\.tsx?$/, "");
+        if (!relPath.startsWith("."))
+          relPath = "./" + relPath;
+        const importLine = `import { ${symbolName} } from '${relPath}';
+`.replace(/\\n/g, "\n");
+        const exportLine = `export { ${symbolName} } from '${relPath}';
+`.replace(/\\n/g, "\n");
+        let updated = false;
+        if (isUsed) {
+          if (!/^import \{ ${symbolName} \} from .+;/m.test(docText)) {
+            docText = importLine + docText;
+            updated = true;
+          }
+        }
+        const exportRegex2 = new RegExp(`export\\s*\\{([^}]*)\\}`, "g");
+        let match;
+        let newDocText = docText;
+        let foundExport = false;
+        while ((match = exportRegex2.exec(docText)) !== null) {
+          const names = match[1].split(",").map((s) => s.trim());
+          if (names.includes(symbolName)) {
+            foundExport = true;
+            const filtered = names.filter((n) => n !== symbolName);
+            let replacement = filtered.length > 0 ? `export { ${filtered.join(", ")} }` : "";
+            newDocText = newDocText.replace(match[0], replacement);
+            newDocText = newDocText + exportLine;
+            updated = true;
+          }
+        }
+        if (updated) {
+          const edit = new vscode.WorkspaceEdit();
+          edit.replace(
+            document.uri,
+            new vscode.Range(0, 0, document.lineCount, 0),
+            newDocText
+          );
+          await vscode.workspace.applyEdit(edit);
+          await document.save();
+        }
+        if (isUsed) {
+          let targetText = targetDoc.getText();
+          const declRegex = new RegExp(
+            `^[\\s\\t]*(?:(?://.*\\n)|(?:/\\*[\\s\\S]*?\\*/\\n)|(?:@[\\w\\(\\)\\.,\\s]*\\n))*[\\s\\t]*(interface|type|class|function)\\s+${symbolName}\\b`,
+            "m"
+          );
+          const exportDeclRegex = new RegExp(
+            `^s*exports+(interface|type|class|function)s+${symbolName}\b`,
+            "m"
+          );
+          if (!exportDeclRegex.test(targetText)) {
+            const beforeReplace = targetText;
+            targetText = targetText.replace(
+              declRegex,
+              (match2) => `export ${match2.trim()}`
+            );
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+              targetDoc.uri,
+              new vscode.Range(0, 0, targetDoc.lineCount, 0),
+              targetText
+            );
+            await vscode.workspace.applyEdit(edit);
+            await targetDoc.save();
+          }
+        }
+      }
       vscode.window.showInformationMessage(
         `Moved symbol to ${filename}${conflict ? " (with duplicate warning)" : ""}`
       );
@@ -141,10 +207,7 @@ function activate(context) {
   );
   context.subscriptions.push(disposable);
 }
-function deactivate() {
-}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  activate,
-  deactivate
+  activate
 });
