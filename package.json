@@ -38,8 +38,8 @@
     "workspace"
   ],
   "scripts": {
-    "build": "tsup --format cjs --out-dir dist --external vscode",
-    "package": "vsce package",
+    "build": "tsup src/extension.ts --format cjs --out-dir dist --external vscode",
+    "package": "npm run build && vsce package",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
