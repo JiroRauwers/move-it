@@ -33,15 +33,233 @@ __export(extension_exports, {
   activate: () => activate
 });
 module.exports = __toCommonJS(extension_exports);
+var vscode3 = __toESM(require("vscode"));
+var path2 = __toESM(require("path"));
+
+// src/utils/file-utils.ts
 var vscode = __toESM(require("vscode"));
 var path = __toESM(require("path"));
+async function findOrOpenEditor(targetUri) {
+  for (const editor of vscode.window.visibleTextEditors) {
+    if (editor.document.uri.fsPath === targetUri.fsPath) {
+      await vscode.window.showTextDocument(editor.document, {
+        viewColumn: editor.viewColumn,
+        preserveFocus: false
+      });
+      return editor;
+    }
+  }
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.fsPath === targetUri.fsPath) {
+      return await vscode.window.showTextDocument(doc, {
+        viewColumn: vscode.ViewColumn.Beside,
+        preserveFocus: false
+      });
+    }
+  }
+  const document = await vscode.workspace.openTextDocument(targetUri);
+  return await vscode.window.showTextDocument(
+    document,
+    vscode.ViewColumn.Beside
+  );
+}
+async function getFileOptions(options) {
+  const { currentFilePath, currentRelativePath, searchText } = options;
+  const startDir = path.dirname(currentFilePath);
+  const targetDir = path.join(startDir, currentRelativePath);
+  const items = [];
+  try {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(
+      vscode.Uri.file(currentFilePath)
+    );
+    const workspaceRoot = workspaceFolder?.uri.fsPath;
+    const isAboveWorkspaceRoot = workspaceRoot && !targetDir.startsWith(workspaceRoot);
+    const isAboveStartDir = !targetDir.startsWith(startDir);
+    if (!isAboveWorkspaceRoot && !isAboveStartDir) {
+      const parentDir = path.dirname(targetDir);
+      const parentPath = currentRelativePath ? path.dirname(currentRelativePath) : path.relative(startDir, parentDir);
+      if (parentDir !== targetDir) {
+        const normalizedParentPath = parentPath === "." ? "" : parentPath.replace(/\\/g, "/");
+        const displayPath = normalizedParentPath || "parent directory";
+        items.push({
+          label: "$(folder-opened) Parent Directory",
+          description: `Go to ${displayPath}`,
+          type: "parent",
+          relativePath: normalizedParentPath
+        });
+      }
+    }
+    const dirents = await vscode.workspace.fs.readDirectory(
+      vscode.Uri.file(targetDir)
+    );
+    const searchLower = searchText.toLowerCase();
+    const directories = dirents.filter(
+      ([name, type]) => type === vscode.FileType.Directory && (!searchText || name.toLowerCase().includes(searchLower))
+    ).map(([name]) => ({
+      label: `$(folder) ${name}`,
+      description: "Directory",
+      type: "directory",
+      relativePath: path.join(currentRelativePath, name).replace(/\\/g, "/"),
+      absolutePath: path.join(targetDir, name)
+    })).sort((a, b) => a.label.localeCompare(b.label));
+    items.push(...directories);
+    const files = dirents.filter(
+      ([name, type]) => type === vscode.FileType.File && /\.(ts|tsx|js|jsx)$/.test(name) && path.join(targetDir, name) !== currentFilePath && (!searchText || name.toLowerCase().includes(searchLower))
+    ).map(([name]) => {
+      const extension = path.extname(name);
+      const fileIcon = extension === ".tsx" || extension === ".jsx" ? "$(react)" : "$(typescript)";
+      const relativePath = path.join(currentRelativePath, name).replace(/\\/g, "/");
+      return {
+        label: `${fileIcon} ${name}`,
+        description: relativePath || "Current directory",
+        type: "file",
+        relativePath
+      };
+    }).sort((a, b) => a.label.localeCompare(b.label));
+    items.push(...files);
+    const newFileName = createNewFileName(searchText);
+    items.push({
+      label: "$(new-file) New File",
+      description: `Create '${newFileName}' in ${currentRelativePath || "current directory"}`,
+      type: "new",
+      relativePath: path.join(currentRelativePath, newFileName).replace(/\\/g, "/")
+    });
+  } catch (error) {
+    console.error("Error reading directory:", error);
+    vscode.window.showErrorMessage(`Error reading directory: ${error}`);
+  }
+  return items;
+}
+function createNewFileName(searchText) {
+  let newFileName = searchText || "types.ts";
+  if (!newFileName.includes(".")) {
+    newFileName += ".ts";
+  }
+  if (!/\.(ts|tsx|js|jsx)$/.test(newFileName)) {
+    newFileName = newFileName.replace(/\.[^/.]+$/, "") + ".ts";
+  }
+  return newFileName;
+}
+
+// src/utils/text-utils.ts
+function insertAfterDirectivesAndComments(source, toInsert) {
+  const lines = source.split(/\r?\n/);
+  let i = 0;
+  let inBlockComment = false;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (inBlockComment) {
+      if (line.includes("*/")) {
+        inBlockComment = false;
+      }
+      i++;
+      continue;
+    }
+    if (/^\s*\/\*/.test(line)) {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+    if (/^\s*\/\//.test(line)) {
+      i++;
+      continue;
+    }
+    if (/^\s*$/.test(line)) {
+      i++;
+      continue;
+    }
+    if (/^\s*['\"]use (client|server|strict)['\"];/.test(line)) {
+      i++;
+      continue;
+    }
+    break;
+  }
+  return [
+    ...lines.slice(0, i),
+    toInsert.replace(/\n$/, ""),
+    // avoid double newline
+    ...lines.slice(i)
+  ].join("\n");
+}
+
+// src/quickpick/file-picker.ts
+var vscode2 = __toESM(require("vscode"));
+async function showFilePicker(currentFilePath) {
+  const quickPick = vscode2.window.createQuickPick();
+  quickPick.placeholder = "Type to search or create a new file";
+  quickPick.title = "Move To File";
+  quickPick.matchOnDescription = true;
+  quickPick.matchOnDetail = true;
+  let currentPath = "";
+  try {
+    return await new Promise((resolve) => {
+      const updateOptions = async (searchValue = "") => {
+        quickPick.busy = true;
+        try {
+          console.log("Updating options for path:", currentPath);
+          quickPick.items = await getFileOptions({
+            currentFilePath,
+            currentRelativePath: currentPath,
+            searchText: searchValue
+          });
+        } catch (error) {
+          console.error("Error updating options:", error);
+          vscode2.window.showErrorMessage(`Failed to update options: ${error}`);
+        } finally {
+          quickPick.busy = false;
+        }
+      };
+      updateOptions();
+      let searchDebounce;
+      quickPick.onDidChangeValue(async (value) => {
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(() => updateOptions(value), 100);
+      });
+      quickPick.onDidAccept(async () => {
+        const selected = quickPick.selectedItems[0];
+        if (!selected) {
+          resolve(void 0);
+          return;
+        }
+        switch (selected.type) {
+          case "directory":
+            currentPath = selected.relativePath;
+            console.log("Navigating to directory:", currentPath);
+            await updateOptions(quickPick.value);
+            break;
+          case "parent":
+            currentPath = selected.relativePath;
+            console.log("Navigating to parent:", currentPath);
+            await updateOptions(quickPick.value);
+            break;
+          case "new":
+            if (selected.relativePath) {
+              resolve(selected.relativePath);
+              quickPick.hide();
+            }
+            break;
+          case "file":
+            resolve(selected.relativePath);
+            quickPick.hide();
+            break;
+        }
+      });
+      quickPick.onDidHide(() => resolve(void 0));
+      quickPick.show();
+    });
+  } finally {
+    quickPick.dispose();
+  }
+}
+
+// src/extension.ts
 function activate(context) {
-  const disposable = vscode.commands.registerCommand(
+  const disposable = vscode3.commands.registerCommand(
     "extension.move-it",
     async () => {
-      const editor = vscode.window.activeTextEditor;
+      const editor = vscode3.window.activeTextEditor;
       if (!editor) {
-        vscode.window.showErrorMessage("No active editor");
+        vscode3.window.showErrorMessage("No active editor");
         return;
       }
       const document = editor.document;
@@ -50,7 +268,7 @@ function activate(context) {
       if (!selection.isEmpty) {
         textRange = selection;
       } else {
-        const symbols = await vscode.commands.executeCommand("vscode.executeDocumentSymbolProvider", document.uri);
+        const symbols = await vscode3.commands.executeCommand("vscode.executeDocumentSymbolProvider", document.uri);
         if (symbols) {
           const findSymbol = (syms) => {
             for (const sym2 of syms) {
@@ -70,12 +288,12 @@ function activate(context) {
         }
       }
       if (!textRange) {
-        vscode.window.showErrorMessage("No text or symbol selected");
+        vscode3.window.showErrorMessage("No text or symbol selected");
         return;
       }
       let selectedText = document.getText(textRange);
       if (!selectedText.trim()) {
-        vscode.window.showErrorMessage("Selected text is empty");
+        vscode3.window.showErrorMessage("Selected text is empty");
         return;
       }
       const exportRegex = /^\s*export\s+(async\s+)?(interface|type|class|function)\s+/;
@@ -83,26 +301,23 @@ function activate(context) {
       if (isExported) {
         selectedText = selectedText.replace(/^\s*export\s+/, "");
       }
-      const filename = await vscode.window.showInputBox({
-        prompt: "Enter filename to move symbol into (relative to current file)",
-        value: "types.ts"
-      });
+      const filename = await showFilePicker(document.uri.fsPath);
       if (!filename)
         return;
-      const currentDir = path.dirname(document.uri.fsPath);
-      const targetUri = vscode.Uri.file(path.join(currentDir, filename));
-      let targetDoc;
-      let targetContent = "";
+      const currentDir = path2.dirname(document.uri.fsPath);
+      const targetUri = vscode3.Uri.file(path2.join(currentDir, filename));
+      let targetEditor;
       try {
-        targetDoc = await vscode.workspace.openTextDocument(targetUri);
-        targetContent = targetDoc.getText();
+        targetEditor = await findOrOpenEditor(targetUri);
       } catch {
-        await vscode.workspace.fs.writeFile(
+        await vscode3.workspace.fs.writeFile(
           targetUri,
           new TextEncoder().encode("")
         );
-        targetDoc = await vscode.workspace.openTextDocument(targetUri);
+        targetEditor = await findOrOpenEditor(targetUri);
       }
+      const targetDoc = targetEditor.document;
+      const targetContent = targetDoc.getText();
       const nameMatch = selectedText.match(
         /(?:interface|type|class|function)\s+(\w+)/
       );
@@ -110,14 +325,10 @@ function activate(context) {
       const conflict = symbolName ? new RegExp(
         `(?:interface|type|class|function)\\s+${symbolName}\b`
       ).test(targetContent) : false;
-      const targetEditor = await vscode.window.showTextDocument(
-        targetDoc,
-        vscode.ViewColumn.Beside
-      );
       await targetEditor.edit((edit) => {
         const insertText = "\n" + (conflict ? `// WARNING: Duplicate symbol "${symbolName}" below
 ` : "") + (isExported ? "export " : "") + selectedText + "\n";
-        edit.insert(new vscode.Position(targetDoc.lineCount, 0), insertText);
+        edit.insert(new vscode3.Position(targetDoc.lineCount, 0), insertText);
       });
       await editor.edit((edit) => {
         edit.delete(textRange);
@@ -133,74 +344,42 @@ function activate(context) {
         );
         const symbolUsage = new RegExp(`\\b${symbolName}\\b`, "g");
         const isUsed = symbolUsage.test(docText);
-        const origDir = path.dirname(document.uri.fsPath);
-        let relPath = path.relative(origDir, targetUri.fsPath).replace(/\\/g, "/").replace(/\.tsx?$/, "");
-        if (!relPath.startsWith("."))
-          relPath = "./" + relPath;
-        const importLine = `import { ${symbolName} } from '${relPath}';
-`.replace(/\\n/g, "\n");
-        const exportLine = `export { ${symbolName} } from '${relPath}';
-`.replace(/\\n/g, "\n");
-        let updated = false;
         if (isUsed) {
+          const origDir = path2.dirname(document.uri.fsPath);
+          let relPath = path2.relative(origDir, targetUri.fsPath).replace(/\\/g, "/").replace(/\.tsx?$/, "");
+          if (!relPath.startsWith("."))
+            relPath = "./" + relPath;
+          const importLine = `import { ${symbolName} } from '${relPath}';
+`;
           if (!/^import \{ ${symbolName} \} from .+;/m.test(docText)) {
-            docText = importLine + docText;
-            updated = true;
+            docText = insertAfterDirectivesAndComments(docText, importLine);
           }
-        }
-        const exportRegex2 = new RegExp(`export\\s*\\{([^}]*)\\}`, "g");
-        let match;
-        let newDocText = docText;
-        let foundExport = false;
-        while ((match = exportRegex2.exec(docText)) !== null) {
-          const names = match[1].split(",").map((s) => s.trim());
-          if (names.includes(symbolName)) {
-            foundExport = true;
-            const filtered = names.filter((n) => n !== symbolName);
-            let replacement = filtered.length > 0 ? `export { ${filtered.join(", ")} }` : "";
-            newDocText = newDocText.replace(match[0], replacement);
-            newDocText = newDocText + exportLine;
-            updated = true;
+          const exportLine = `export { ${symbolName} } from '${relPath}';
+`;
+          const exportRegex2 = new RegExp(`export\\s*\\{([^}]*)\\}`, "g");
+          let match;
+          let foundExport = false;
+          while ((match = exportRegex2.exec(docText)) !== null) {
+            const names = match[1].split(",").map((s) => s.trim());
+            if (names.includes(symbolName)) {
+              foundExport = true;
+              const filtered = names.filter((n) => n !== symbolName);
+              const replacement = filtered.length > 0 ? `export { ${filtered.join(", ")} }` : "";
+              docText = docText.replace(match[0], replacement);
+              docText = docText + exportLine;
+            }
           }
-        }
-        if (updated) {
-          const edit = new vscode.WorkspaceEdit();
+          const edit = new vscode3.WorkspaceEdit();
           edit.replace(
             document.uri,
-            new vscode.Range(0, 0, document.lineCount, 0),
-            newDocText
+            new vscode3.Range(0, 0, document.lineCount, 0),
+            docText
           );
-          await vscode.workspace.applyEdit(edit);
+          await vscode3.workspace.applyEdit(edit);
           await document.save();
         }
-        if (isUsed) {
-          let targetText = targetDoc.getText();
-          const declRegex = new RegExp(
-            `^[\\s\\t]*(?:(?://.*\\n)|(?:/\\*[\\s\\S]*?\\*/\\n)|(?:@[\\w\\(\\)\\.,\\s]*\\n))*[\\s\\t]*(interface|type|class|function)\\s+${symbolName}\\b`,
-            "m"
-          );
-          const exportDeclRegex = new RegExp(
-            `^s*exports+(interface|type|class|function)s+${symbolName}\b`,
-            "m"
-          );
-          if (!exportDeclRegex.test(targetText)) {
-            const beforeReplace = targetText;
-            targetText = targetText.replace(
-              declRegex,
-              (match2) => `export ${match2.trim()}`
-            );
-            const edit = new vscode.WorkspaceEdit();
-            edit.replace(
-              targetDoc.uri,
-              new vscode.Range(0, 0, targetDoc.lineCount, 0),
-              targetText
-            );
-            await vscode.workspace.applyEdit(edit);
-            await targetDoc.save();
-          }
-        }
       }
-      vscode.window.showInformationMessage(
+      vscode3.window.showInformationMessage(
         `Moved symbol to ${filename}${conflict ? " (with duplicate warning)" : ""}`
       );
     }
