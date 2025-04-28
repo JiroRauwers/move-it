@@ -1,12 +1,17 @@
 {
-  "name": "move-symbol-to-file",
-  "version": "0.0.4",
-  "publisher": "jiroRauwers <jairorauwers@gmail.com>",
+  "name": "move-it",
+  "version": "0.0.5",
+  "publisher": "jiroRauwers",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.70.0"
   },
   "activationEvents": ["onCommand:extension.moveSymbolToFile"],
   "main": "./dist/extension.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jiroRauwers/move-it.git"
+  },
   "contributes": {
     "commands": [
       {
