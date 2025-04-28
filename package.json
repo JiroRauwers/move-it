@@ -1,39 +1,52 @@
 {
   "name": "move-it",
-  "version": "0.0.5",
+  "version": "0.0.6",
+  "displayName": "Move It",
   "publisher": "jiroRauwers",
   "license": "MIT",
-  "engines": {
-    "vscode": "^1.70.0"
-  },
-  "activationEvents": ["onCommand:extension.moveSymbolToFile"],
-  "main": "./dist/extension.js",
   "repository": {
     "type": "git",
     "url": "https://github.com/jiroRauwers/move-it.git"
   },
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "activationEvents": [
+    "onCommand:extension.move-it"
+  ],
+  "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "extension.moveSymbolToFile",
+        "command": "extension.move-it",
         "title": "Move Symbol to File"
       }
     ],
     "keybindings": [
       {
-        "command": "extension.moveSymbolToFile",
+        "command": "extension.move-it",
         "key": "shift+f2",
         "when": "editorTextFocus && editorLangId == typescript"
       }
+    ],
+    "categories": [
+      "Other",
+      "Programming Languages"
     ]
   },
-  "dependencies": {},
-  "devDependencies": {
-    "typescript": "^5.0.0",
-    "@types/vscode": "^1.70.0",
-    "tsup": "^6.0.0"
-  },
+  "extensionKind": [
+    "workspace"
+  ],
   "scripts": {
-    "build": "tsup src/extension.ts --format cjs --out-dir dist --external vscode"
+    "build": "tsup --format cjs --out-dir dist --external vscode",
+    "package": "vsce package",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@types/vscode": "^1.70.0",
+    "tsup": "^6.0.0",
+    "typescript": "^5.0.0",
+    "vsce": "^2.15.0"
   }
 }

@@ -35,92 +35,110 @@ __export(extension_exports, {
 });
 module.exports = __toCommonJS(extension_exports);
 var vscode = __toESM(require("vscode"));
+var path = __toESM(require("path"));
 function activate(context) {
-  let disposable = vscode.commands.registerCommand("extension.moveSymbolToFile", async () => {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      vscode.window.showErrorMessage("No active editor");
-      return;
-    }
-    const document = editor.document;
-    let selection = editor.selection;
-    let textRange;
-    if (!selection.isEmpty) {
-      textRange = selection;
-    } else {
-      const symbols = await vscode.commands.executeCommand("vscode.executeDocumentSymbolProvider", document.uri);
-      if (symbols) {
-        const findSymbol = (syms) => {
-          for (const sym2 of syms) {
-            if (sym2.range.contains(selection.start)) {
-              return sym2;
+  const disposable = vscode.commands.registerCommand(
+    "extension.moveIt",
+    async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showErrorMessage("No active editor");
+        return;
+      }
+      const document = editor.document;
+      const selection = editor.selection;
+      let textRange;
+      if (!selection.isEmpty) {
+        textRange = selection;
+      } else {
+        const symbols = await vscode.commands.executeCommand("vscode.executeDocumentSymbolProvider", document.uri);
+        if (symbols) {
+          const findSymbol = (syms) => {
+            for (const sym2 of syms) {
+              if (sym2.range.contains(selection.start)) {
+                return sym2;
+              }
+              const child = findSymbol(sym2.children);
+              if (child)
+                return child;
             }
-            const foundInChildren = findSymbol(sym2.children);
-            if (foundInChildren) {
-              return foundInChildren;
-            }
+            return void 0;
+          };
+          const sym = findSymbol(symbols);
+          if (sym) {
+            textRange = sym.range;
           }
-          return void 0;
-        };
-        const sym = findSymbol(symbols);
-        if (sym) {
-          textRange = sym.range;
         }
       }
-    }
-    if (!textRange) {
-      vscode.window.showErrorMessage("No text or symbol selected");
-      return;
-    }
-    const selectedText = document.getText(textRange);
-    if (!selectedText.trim()) {
-      vscode.window.showErrorMessage("Selected text is empty");
-      return;
-    }
-    const filename = await vscode.window.showInputBox({
-      prompt: "Enter filename to move symbol into (relative to workspace)",
-      value: "types.ts"
-    });
-    if (!filename)
-      return;
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-    if (!workspaceFolder) {
-      vscode.window.showErrorMessage("No workspace folder found");
-      return;
-    }
-    const targetUri = vscode.Uri.joinPath(workspaceFolder.uri, filename);
-    try {
+      if (!textRange) {
+        vscode.window.showErrorMessage("No text or symbol selected");
+        return;
+      }
+      let selectedText = document.getText(textRange);
+      if (!selectedText.trim()) {
+        vscode.window.showErrorMessage("Selected text is empty");
+        return;
+      }
+      const exportRegex = /^\s*export\s+(async\s+)?(interface|type|class|function)\s+/;
+      const isExported = exportRegex.test(selectedText);
+      if (isExported) {
+        selectedText = selectedText.replace(/^\s*export\s+/, "");
+      }
+      const filename = await vscode.window.showInputBox({
+        prompt: "Enter filename to move symbol into (relative to current file)",
+        value: "types.ts"
+      });
+      if (!filename)
+        return;
+      const currentDir = path.dirname(document.uri.fsPath);
+      const targetUri = vscode.Uri.file(path.join(currentDir, filename));
       let targetDoc;
       let targetContent = "";
       try {
         targetDoc = await vscode.workspace.openTextDocument(targetUri);
         targetContent = targetDoc.getText();
       } catch {
-        await vscode.workspace.fs.writeFile(targetUri, new TextEncoder().encode(""));
+        await vscode.workspace.fs.writeFile(
+          targetUri,
+          new TextEncoder().encode("")
+        );
         targetDoc = await vscode.workspace.openTextDocument(targetUri);
       }
-      const symbolNameMatch = selectedText.match(/(interface|type|class)\s+(\w+)/);
-      const symbolName = symbolNameMatch ? symbolNameMatch[2] : void 0;
-      const conflict = symbolName ? targetContent.includes(`interface ${symbolName}`) || targetContent.includes(`type ${symbolName}`) || targetContent.includes(`class ${symbolName}`) : false;
-      const targetEditor = await vscode.window.showTextDocument(targetDoc, vscode.ViewColumn.Beside);
+      const nameMatch = selectedText.match(
+        /(?:interface|type|class|function)\s+(\w+)/
+      );
+      const symbolName = nameMatch ? nameMatch[1] : void 0;
+      const conflict = symbolName ? new RegExp(
+        `(?:interface|type|class|function)\\s+${symbolName}\b`
+      ).test(targetContent) : false;
+      const targetEditor = await vscode.window.showTextDocument(
+        targetDoc,
+        vscode.ViewColumn.Beside
+      );
       await targetEditor.edit((edit) => {
-        edit.insert(
-          new vscode.Position(targetDoc.lineCount, 0),
-          "\n" + (conflict ? `// WARNING: Duplicate symbol "${symbolName}" below
-` : "") + selectedText + "\n"
-        );
+        const insertText = "\n" + (conflict ? `// WARNING: Duplicate symbol "${symbolName}" below
+` : "") + (isExported ? "export " : "") + selectedText + "\n";
+        edit.insert(new vscode.Position(targetDoc.lineCount, 0), insertText);
       });
       await editor.edit((edit) => {
         edit.delete(textRange);
+        if (isExported && symbolName) {
+          const origDir = path.dirname(document.uri.fsPath);
+          let relPath = path.relative(origDir, targetUri.fsPath).replace(/\\/g, "/").replace(/\.tsx?$/, "");
+          if (!relPath.startsWith("."))
+            relPath = "./" + relPath;
+          const importLine = `import { ${symbolName} } from '${relPath}';
+`;
+          edit.insert(new vscode.Position(0, 0), importLine);
+        }
       });
       await document.save();
       await targetDoc.save();
-      vscode.window.showInformationMessage(`Moved symbol to ${filename}${conflict ? " (with duplicate warning)" : ""}`);
-    } catch (error) {
-      console.error(error);
-      vscode.window.showErrorMessage("Failed to move symbol");
+      vscode.window.showInformationMessage(
+        `Moved symbol to ${filename}${conflict ? " (with duplicate warning)" : ""}`
+      );
     }
-  });
+  );
   context.subscriptions.push(disposable);
 }
 function deactivate() {
