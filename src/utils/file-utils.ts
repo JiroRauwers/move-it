@@ -49,82 +49,101 @@ export async function getFileOptions(options: {
   searchText: string;
 }): Promise<FilePickItem[]> {
   const { currentFilePath, currentRelativePath, searchText } = options;
-  const startDir = path.dirname(currentFilePath);
-  const targetDir = path.join(startDir, currentRelativePath);
   const items: FilePickItem[] = [];
 
   try {
-    // Get workspace root if it exists
+    // Get workspace info
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(
       vscode.Uri.file(currentFilePath)
     );
     const workspaceRoot = workspaceFolder?.uri.fsPath;
 
-    // Check if we can go up (we can if we're not at workspace root)
-    const canGoUp = workspaceRoot
-      ? // If we have a workspace, check if we're still within it
-        targetDir.startsWith(workspaceRoot) && targetDir !== workspaceRoot
-      : // If no workspace, check if we're still within the starting directory
-        targetDir.startsWith(startDir) && targetDir !== startDir;
+    // Always use the file's directory as the base for navigation
+    const fileDir = path.dirname(currentFilePath);
 
-    if (canGoUp) {
-      const parentDir = path.dirname(targetDir);
-      let parentPath = "";
+    // Calculate current absolute directory
+    const absoluteCurrentDir = path.resolve(fileDir, currentRelativePath || "");
 
-      if (currentRelativePath) {
-        // If we have a relative path, just go up one level in it
-        parentPath = path.dirname(currentRelativePath);
-        if (parentPath === ".") parentPath = "";
-      } else {
-        // Calculate relative path from start directory
-        parentPath = path.relative(startDir, parentDir);
-      }
+    // Debug logging
+    console.log("Path Debug:", {
+      currentFilePath,
+      currentRelativePath,
+      fileDir,
+      absoluteCurrentDir,
+      workspaceRoot,
+    });
 
-      // Normalize path for display
-      const normalizedParentPath = parentPath.replace(/\\/g, "/");
-      const displayPath = normalizedParentPath || "parent directory";
+    // Check if we can go up (not at workspace root if in workspace, or not at starting directory)
+    const isAtLimit = workspaceRoot
+      ? path.normalize(absoluteCurrentDir).toLowerCase() ===
+        path.normalize(workspaceRoot).toLowerCase()
+      : path.normalize(absoluteCurrentDir).toLowerCase() ===
+        path.normalize(fileDir).toLowerCase();
+
+    if (!isAtLimit) {
+      // Add parent directory option
+      const parentDir = path.dirname(absoluteCurrentDir);
+      const displayName = path.basename(parentDir);
+
+      // Calculate relative path from file directory
+      const relativeToFile = path.relative(fileDir, parentDir);
+
+      // Debug logging
+      console.log("Parent Directory Debug:", {
+        parentDir,
+        displayName,
+        relativeToFile,
+      });
 
       items.push({
         label: "$(arrow-up) $(folder-opened) ..",
-        description: `Go to ${displayPath}`,
+        description: `Go to ${displayName}`,
         type: "parent",
-        relativePath: normalizedParentPath,
+        relativePath: relativeToFile.replace(/\\/g, "/"),
       });
     }
 
-    // Read directory contents
+    // Read current directory contents
     const dirents = await vscode.workspace.fs.readDirectory(
-      vscode.Uri.file(targetDir)
+      vscode.Uri.file(absoluteCurrentDir)
     );
 
-    // Filter and sort items based on search text
+    // Filter and sort based on search text
     const searchLower = searchText.toLowerCase();
 
-    // Add directories first
+    // Add directories
     const directories = dirents
       .filter(
         ([name, type]) =>
           type === vscode.FileType.Directory &&
           (!searchText || name.toLowerCase().includes(searchLower))
       )
-      .map(([name]) => ({
-        label: `$(folder) ${name}`,
-        description: "Directory",
-        type: "directory" as const,
-        relativePath: path.join(currentRelativePath, name).replace(/\\/g, "/"),
-        absolutePath: path.join(targetDir, name),
-      }))
+      .map(([name]) => {
+        // Calculate relative path from file directory
+        const fullPath = path.join(absoluteCurrentDir, name);
+        const relativePath = path
+          .relative(fileDir, fullPath)
+          .replace(/\\/g, "/");
+
+        return {
+          label: `$(folder) ${name}`,
+          description: "Directory",
+          type: "directory" as const,
+          relativePath,
+          absolutePath: fullPath,
+        };
+      })
       .sort((a, b) => a.label.localeCompare(b.label));
 
     items.push(...directories);
 
-    // Add matching files
+    // Add TypeScript/JavaScript files
     const files = dirents
       .filter(
         ([name, type]) =>
           type === vscode.FileType.File &&
           /\.(ts|tsx|js|jsx)$/.test(name) &&
-          path.join(targetDir, name) !== currentFilePath &&
+          path.join(absoluteCurrentDir, name) !== currentFilePath &&
           (!searchText || name.toLowerCase().includes(searchLower))
       )
       .map(([name]) => {
@@ -133,9 +152,13 @@ export async function getFileOptions(options: {
           extension === ".tsx" || extension === ".jsx"
             ? "$(react)"
             : "$(typescript)";
+
+        // Calculate relative path from file directory
+        const fullPath = path.join(absoluteCurrentDir, name);
         const relativePath = path
-          .join(currentRelativePath, name)
+          .relative(fileDir, fullPath)
           .replace(/\\/g, "/");
+
         return {
           label: `${fileIcon} ${name}`,
           description: relativePath || "Current directory",
@@ -147,17 +170,28 @@ export async function getFileOptions(options: {
 
     items.push(...files);
 
-    // Add "New File" option with suggested name
-    const newFileName = createNewFileName(searchText);
+    // Add "New File" option
+    let newFileName = searchText || "types.ts";
+    if (!newFileName.includes(".")) {
+      newFileName += ".ts";
+    }
+    if (!/\.(ts|tsx|js|jsx)$/.test(newFileName)) {
+      newFileName = newFileName.replace(/\.[^/.]+$/, "") + ".ts";
+    }
+
+    // Calculate new file path relative to file directory
+    const newFilePath = path.join(absoluteCurrentDir, newFileName);
+    const newFileRelativePath = path
+      .relative(fileDir, newFilePath)
+      .replace(/\\/g, "/");
+
     items.push({
       label: "$(new-file) New File",
       description: `Create '${newFileName}' in ${
         currentRelativePath || "current directory"
       }`,
       type: "new",
-      relativePath: path
-        .join(currentRelativePath, newFileName)
-        .replace(/\\/g, "/"),
+      relativePath: newFileRelativePath,
     });
   } catch (error) {
     console.error("Error reading directory:", error);
@@ -165,18 +199,4 @@ export async function getFileOptions(options: {
   }
 
   return items;
-}
-
-/**
- * Creates a new file name based on search text or default
- */
-function createNewFileName(searchText: string): string {
-  let newFileName = searchText || "types.ts";
-  if (!newFileName.includes(".")) {
-    newFileName += ".ts";
-  }
-  if (!/\.(ts|tsx|js|jsx)$/.test(newFileName)) {
-    newFileName = newFileName.replace(/\.[^/.]+$/, "") + ".ts";
-  }
-  return newFileName;
 }

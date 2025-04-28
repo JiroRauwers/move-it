@@ -65,50 +65,63 @@ async function findOrOpenEditor(targetUri) {
 }
 async function getFileOptions(options) {
   const { currentFilePath, currentRelativePath, searchText } = options;
-  const startDir = path.dirname(currentFilePath);
-  const targetDir = path.join(startDir, currentRelativePath);
   const items = [];
   try {
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(
       vscode.Uri.file(currentFilePath)
     );
     const workspaceRoot = workspaceFolder?.uri.fsPath;
-    const isAboveWorkspaceRoot = workspaceRoot && !targetDir.startsWith(workspaceRoot);
-    const isAboveStartDir = !targetDir.startsWith(startDir);
-    if (!isAboveWorkspaceRoot && !isAboveStartDir) {
-      const parentDir = path.dirname(targetDir);
-      const parentPath = currentRelativePath ? path.dirname(currentRelativePath) : path.relative(startDir, parentDir);
-      if (parentDir !== targetDir) {
-        const normalizedParentPath = parentPath === "." ? "" : parentPath.replace(/\\/g, "/");
-        const displayPath = normalizedParentPath || "parent directory";
-        items.push({
-          label: "$(folder-opened) Parent Directory",
-          description: `Go to ${displayPath}`,
-          type: "parent",
-          relativePath: normalizedParentPath
-        });
-      }
+    const fileDir = path.dirname(currentFilePath);
+    const absoluteCurrentDir = path.resolve(fileDir, currentRelativePath || "");
+    console.log("Path Debug:", {
+      currentFilePath,
+      currentRelativePath,
+      fileDir,
+      absoluteCurrentDir,
+      workspaceRoot
+    });
+    const isAtLimit = workspaceRoot ? path.normalize(absoluteCurrentDir).toLowerCase() === path.normalize(workspaceRoot).toLowerCase() : path.normalize(absoluteCurrentDir).toLowerCase() === path.normalize(fileDir).toLowerCase();
+    if (!isAtLimit) {
+      const parentDir = path.dirname(absoluteCurrentDir);
+      const displayName = path.basename(parentDir);
+      const relativeToFile = path.relative(fileDir, parentDir);
+      console.log("Parent Directory Debug:", {
+        parentDir,
+        displayName,
+        relativeToFile
+      });
+      items.push({
+        label: "$(arrow-up) $(folder-opened) ..",
+        description: `Go to ${displayName}`,
+        type: "parent",
+        relativePath: relativeToFile.replace(/\\/g, "/")
+      });
     }
     const dirents = await vscode.workspace.fs.readDirectory(
-      vscode.Uri.file(targetDir)
+      vscode.Uri.file(absoluteCurrentDir)
     );
     const searchLower = searchText.toLowerCase();
     const directories = dirents.filter(
       ([name, type]) => type === vscode.FileType.Directory && (!searchText || name.toLowerCase().includes(searchLower))
-    ).map(([name]) => ({
-      label: `$(folder) ${name}`,
-      description: "Directory",
-      type: "directory",
-      relativePath: path.join(currentRelativePath, name).replace(/\\/g, "/"),
-      absolutePath: path.join(targetDir, name)
-    })).sort((a, b) => a.label.localeCompare(b.label));
+    ).map(([name]) => {
+      const fullPath = path.join(absoluteCurrentDir, name);
+      const relativePath = path.relative(fileDir, fullPath).replace(/\\/g, "/");
+      return {
+        label: `$(folder) ${name}`,
+        description: "Directory",
+        type: "directory",
+        relativePath,
+        absolutePath: fullPath
+      };
+    }).sort((a, b) => a.label.localeCompare(b.label));
     items.push(...directories);
     const files = dirents.filter(
-      ([name, type]) => type === vscode.FileType.File && /\.(ts|tsx|js|jsx)$/.test(name) && path.join(targetDir, name) !== currentFilePath && (!searchText || name.toLowerCase().includes(searchLower))
+      ([name, type]) => type === vscode.FileType.File && /\.(ts|tsx|js|jsx)$/.test(name) && path.join(absoluteCurrentDir, name) !== currentFilePath && (!searchText || name.toLowerCase().includes(searchLower))
     ).map(([name]) => {
       const extension = path.extname(name);
       const fileIcon = extension === ".tsx" || extension === ".jsx" ? "$(react)" : "$(typescript)";
-      const relativePath = path.join(currentRelativePath, name).replace(/\\/g, "/");
+      const fullPath = path.join(absoluteCurrentDir, name);
+      const relativePath = path.relative(fileDir, fullPath).replace(/\\/g, "/");
       return {
         label: `${fileIcon} ${name}`,
         description: relativePath || "Current directory",
@@ -117,28 +130,26 @@ async function getFileOptions(options) {
       };
     }).sort((a, b) => a.label.localeCompare(b.label));
     items.push(...files);
-    const newFileName = createNewFileName(searchText);
+    let newFileName = searchText || "types.ts";
+    if (!newFileName.includes(".")) {
+      newFileName += ".ts";
+    }
+    if (!/\.(ts|tsx|js|jsx)$/.test(newFileName)) {
+      newFileName = newFileName.replace(/\.[^/.]+$/, "") + ".ts";
+    }
+    const newFilePath = path.join(absoluteCurrentDir, newFileName);
+    const newFileRelativePath = path.relative(fileDir, newFilePath).replace(/\\/g, "/");
     items.push({
       label: "$(new-file) New File",
       description: `Create '${newFileName}' in ${currentRelativePath || "current directory"}`,
       type: "new",
-      relativePath: path.join(currentRelativePath, newFileName).replace(/\\/g, "/")
+      relativePath: newFileRelativePath
     });
   } catch (error) {
     console.error("Error reading directory:", error);
     vscode.window.showErrorMessage(`Error reading directory: ${error}`);
   }
   return items;
-}
-function createNewFileName(searchText) {
-  let newFileName = searchText || "types.ts";
-  if (!newFileName.includes(".")) {
-    newFileName += ".ts";
-  }
-  if (!/\.(ts|tsx|js|jsx)$/.test(newFileName)) {
-    newFileName = newFileName.replace(/\.[^/.]+$/, "") + ".ts";
-  }
-  return newFileName;
 }
 
 // src/utils/text-utils.ts
@@ -192,7 +203,7 @@ async function showFilePicker(currentFilePath) {
   quickPick.matchOnDetail = true;
   let currentPath = "";
   try {
-    return await new Promise((resolve) => {
+    return await new Promise((resolve2) => {
       const updateOptions = async (searchValue = "") => {
         quickPick.busy = true;
         try {
@@ -218,7 +229,7 @@ async function showFilePicker(currentFilePath) {
       quickPick.onDidAccept(async () => {
         const selected = quickPick.selectedItems[0];
         if (!selected) {
-          resolve(void 0);
+          resolve2(void 0);
           return;
         }
         switch (selected.type) {
@@ -234,17 +245,17 @@ async function showFilePicker(currentFilePath) {
             break;
           case "new":
             if (selected.relativePath) {
-              resolve(selected.relativePath);
+              resolve2(selected.relativePath);
               quickPick.hide();
             }
             break;
           case "file":
-            resolve(selected.relativePath);
+            resolve2(selected.relativePath);
             quickPick.hide();
             break;
         }
       });
-      quickPick.onDidHide(() => resolve(void 0));
+      quickPick.onDidHide(() => resolve2(void 0));
       quickPick.show();
     });
   } finally {

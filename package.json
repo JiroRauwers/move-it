@@ -1,52 +1,15 @@
 {
   "name": "move-it",
-  "version": "0.0.9",
-  "displayName": "Move It",
-  "publisher": "jiroRauwers",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/jiroRauwers/move-it.git"
-  },
-  "engines": {
-    "vscode": "^1.70.0"
-  },
-  "activationEvents": [
-    "onCommand:extension.move-it"
-  ],
-  "main": "./dist/extension.js",
-  "contributes": {
-    "commands": [
-      {
-        "command": "extension.move-it",
-        "title": "Move Symbol to File"
-      }
-    ],
-    "keybindings": [
-      {
-        "command": "extension.move-it",
-        "key": "shift+f2",
-        "when": "editorTextFocus && editorLangId == typescript"
-      }
-    ],
-    "categories": [
-      "Other",
-      "Programming Languages"
-    ]
-  },
-  "extensionKind": [
-    "workspace"
-  ],
+  "module": "index.ts",
+  "type": "module",
   "scripts": {
-    "build": "tsup src/extension.ts --format cjs --out-dir dist --external vscode",
-    "package": "npm run build && vsce package",
-    "prepublishOnly": "npm run build"
+    "test": "bun test src/__tests__/**/*.test.ts",
+    "test:watch": "bun test --watch src/__tests__/**/*.test.ts",
+    "test:coverage": "bun test --coverage src/__tests__/**/*.test.ts"
   },
   "devDependencies": {
-    "@types/node": "^22.15.3",
-    "@types/vscode": "^1.70.0",
-    "tsup": "^6.0.0",
-    "typescript": "^5.0.0",
-    "vsce": "^2.15.0"
+    "bun-types": "latest",
+    "@types/jest": "^29.5.14",
+    "@types/vscode": "^1.70.0"
   }
 }
