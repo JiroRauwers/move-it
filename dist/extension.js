@@ -1,44 +1,10 @@
-"use strict";
-var __create = Object.create;
-var __defProp = Object.defineProperty;
-var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __getProtoOf = Object.getPrototypeOf;
-var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
-};
-var __copyProps = (to, from, except, desc) => {
-  if (from && typeof from === "object" || typeof from === "function") {
-    for (let key of __getOwnPropNames(from))
-      if (!__hasOwnProp.call(to, key) && key !== except)
-        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
-  }
-  return to;
-};
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
-  mod
-));
-var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
-
 // src/extension.ts
-var extension_exports = {};
-__export(extension_exports, {
-  activate: () => activate
-});
-module.exports = __toCommonJS(extension_exports);
-var vscode3 = __toESM(require("vscode"));
-var path2 = __toESM(require("path"));
+import * as vscode3 from "vscode";
+import * as path2 from "path";
 
 // src/utils/file-utils.ts
-var vscode = __toESM(require("vscode"));
-var path = __toESM(require("path"));
+import * as vscode from "vscode";
+import * as path from "path";
 async function findOrOpenEditor(targetUri) {
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document.uri.fsPath === targetUri.fsPath) {
@@ -70,7 +36,7 @@ async function getFileOptions(options) {
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(
       vscode.Uri.file(currentFilePath)
     );
-    const workspaceRoot = workspaceFolder?.uri.fsPath;
+    const workspaceRoot = workspaceFolder == null ? void 0 : workspaceFolder.uri.fsPath;
     const fileDir = path.dirname(currentFilePath);
     const absoluteCurrentDir = path.resolve(fileDir, currentRelativePath || "");
     console.log("Path Debug:", {
@@ -154,47 +120,158 @@ async function getFileOptions(options) {
 
 // src/utils/text-utils.ts
 function insertAfterDirectivesAndComments(source, toInsert) {
+  var _a, _b;
   const lines = source.split(/\r?\n/);
   let i = 0;
   let inBlockComment = false;
+  let lastDirective = -1;
+  let lastComment = -1;
+  let firstCodeLine = -1;
   while (i < lines.length) {
-    const line = lines[i];
+    const line = lines[i].trim();
     if (inBlockComment) {
       if (line.includes("*/")) {
         inBlockComment = false;
+        lastComment = i;
       }
-      i++;
-      continue;
+    } else {
+      if (line.startsWith("/*")) {
+        inBlockComment = true;
+        lastComment = i;
+      } else if (line.startsWith("//")) {
+        lastComment = i;
+      } else if (/^['"](use strict|use client|use server)['"];?$/.test(line)) {
+        lastDirective = i;
+      } else if (line !== "") {
+        if (firstCodeLine === -1) {
+          firstCodeLine = i;
+        }
+      }
     }
-    if (/^\s*\/\*/.test(line)) {
-      inBlockComment = true;
-      i++;
-      continue;
-    }
-    if (/^\s*\/\//.test(line)) {
-      i++;
-      continue;
-    }
-    if (/^\s*$/.test(line)) {
-      i++;
-      continue;
-    }
-    if (/^\s*['\"]use (client|server|strict)['\"];/.test(line)) {
-      i++;
-      continue;
-    }
-    break;
+    i++;
   }
+  let insertPosition;
+  if (lastDirective >= 0 && lastComment >= 0) {
+    insertPosition = Math.max(lastDirective, lastComment) + 1;
+  } else if (lastDirective >= 0) {
+    insertPosition = lastDirective + 1;
+  } else if (lastComment >= 0) {
+    insertPosition = lastComment + 1;
+  } else {
+    insertPosition = firstCodeLine >= 0 ? firstCodeLine : 0;
+  }
+  const nextLine = ((_a = lines[insertPosition]) == null ? void 0 : _a.trim()) || "";
+  const prevLine = ((_b = lines[insertPosition - 1]) == null ? void 0 : _b.trim()) || "";
+  const needsBlankLine = insertPosition < lines.length && nextLine !== "" && !prevLine.endsWith(";") && // Don't add blank line after directive
+  !prevLine.endsWith("*/");
   return [
-    ...lines.slice(0, i),
-    toInsert.replace(/\n$/, ""),
-    // avoid double newline
-    ...lines.slice(i)
-  ].join("\n");
+    ...lines.slice(0, insertPosition),
+    needsBlankLine ? "" : null,
+    toInsert,
+    ...lines.slice(insertPosition)
+  ].filter((line) => line !== null).join("\n");
+}
+function findExistingImport(sourceCode, importPath) {
+  const lines = sourceCode.split(/\r?\n/);
+  const importRegex = new RegExp(
+    `^\\s*import\\s*{([^}]*)}\\s*from\\s*['"]${importPath.replace(
+      /\./g,
+      "\\."
+    )}['"]\\s*;?`
+  );
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(importRegex);
+    if (match) {
+      const namedImports = match[1].split(",").map((imp) => imp.trim()).filter((imp) => imp.length > 0);
+      return {
+        startLine: i,
+        endLine: i,
+        importStatement: lines[i],
+        namedImports
+      };
+    }
+  }
+  return null;
+}
+function mergeImports(existingImport, newImportName) {
+  const importMatch = existingImport.match(
+    /^(\s*import\s*{)([^}]*)(}\s*from\s*['"].*['"];?\s*)$/
+  );
+  if (!importMatch)
+    return existingImport;
+  const [, start, namedImports, end] = importMatch;
+  const imports = namedImports.split(",").map((imp) => imp.trim()).filter((imp) => imp.length > 0);
+  if (!imports.includes(newImportName)) {
+    imports.push(newImportName);
+  }
+  imports.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  return `${start} ${imports.join(", ")} ${end}`;
+}
+function updateImportsForMove(sourceFilePath, targetFilePath, symbolName, sourceCode, targetCode) {
+  const sourceToTarget = getRelativeImportPath(sourceFilePath, targetFilePath);
+  const targetToSource = getRelativeImportPath(targetFilePath, sourceFilePath);
+  let updatedSourceCode = sourceCode;
+  const existingImportInSource = findExistingImport(sourceCode, sourceToTarget);
+  if (existingImportInSource) {
+    const lines = sourceCode.split(/\r?\n/);
+    const modifiedImport = mergeImports(
+      existingImportInSource.importStatement,
+      symbolName
+    );
+    updatedSourceCode = [
+      ...lines.slice(0, existingImportInSource.startLine),
+      modifiedImport,
+      ...lines.slice(existingImportInSource.endLine + 1)
+    ].join("\n");
+  } else {
+    const importStatement = `import { ${symbolName} } from '${sourceToTarget}';`;
+    updatedSourceCode = insertAfterDirectivesAndComments(
+      sourceCode,
+      importStatement
+    );
+  }
+  let updatedTargetCode = targetCode;
+  const existingImportInTarget = findExistingImport(targetCode, targetToSource);
+  if (existingImportInTarget) {
+    const lines = targetCode.split(/\r?\n/);
+    const modifiedImport = mergeImports(
+      existingImportInTarget.importStatement,
+      symbolName
+    );
+    updatedTargetCode = [
+      ...lines.slice(0, existingImportInTarget.startLine),
+      modifiedImport,
+      ...lines.slice(existingImportInTarget.endLine + 1)
+    ].join("\n");
+  } else {
+    const newImport = `import { ${symbolName} } from '${targetToSource}';`;
+    updatedTargetCode = insertAfterDirectivesAndComments(targetCode, newImport);
+  }
+  return {
+    updatedSourceCode,
+    updatedTargetCode
+  };
+}
+function getRelativeImportPath(fromPath, toPath) {
+  const cleanFromPath = fromPath.replace(/\.[^/.]+$/, "").replace(/\\/g, "/");
+  const cleanToPath = toPath.replace(/\.[^/.]+$/, "").replace(/\\/g, "/");
+  if (cleanFromPath.split("/").slice(0, -1).join("/") === cleanToPath.split("/").slice(0, -1).join("/")) {
+    return "./" + cleanToPath.split("/").pop();
+  }
+  const fromParts = cleanFromPath.split("/");
+  const toParts = cleanToPath.split("/");
+  while (fromParts.length > 0 && toParts.length > 0 && fromParts[0] === toParts[0]) {
+    fromParts.shift();
+    toParts.shift();
+  }
+  const backSteps = fromParts.length - 1;
+  const relativePath = backSteps > 0 ? Array(backSteps).fill("..").join("/") : ".";
+  const targetPath = toParts.join("/");
+  return targetPath ? `${relativePath}/${targetPath}` : relativePath;
 }
 
 // src/quickpick/file-picker.ts
-var vscode2 = __toESM(require("vscode"));
+import * as vscode2 from "vscode";
 async function showFilePicker(currentFilePath) {
   const quickPick = vscode2.window.createQuickPick();
   quickPick.placeholder = "Type to search or create a new file";
@@ -334,61 +411,52 @@ function activate(context) {
       );
       const symbolName = nameMatch ? nameMatch[1] : void 0;
       const conflict = symbolName ? new RegExp(
-        `(?:interface|type|class|function)\\s+${symbolName}\b`
+        `(?:interface|type|class|function)\\s+${symbolName}\\b`
       ).test(targetContent) : false;
+      if (conflict) {
+        const proceed = await vscode3.window.showWarningMessage(
+          `Symbol "${symbolName}" already exists in target file. Proceed anyway?`,
+          "Yes",
+          "No"
+        );
+        if (proceed !== "Yes")
+          return;
+      }
       await targetEditor.edit((edit) => {
-        const insertText = "\n" + (conflict ? `// WARNING: Duplicate symbol "${symbolName}" below
-` : "") + (isExported ? "export " : "") + selectedText + "\n";
+        const insertText = "\n" + (isExported ? "export " : "") + selectedText + "\n";
         edit.insert(new vscode3.Position(targetDoc.lineCount, 0), insertText);
       });
       await editor.edit((edit) => {
         edit.delete(textRange);
       });
-      await document.save();
-      await targetDoc.save();
       if (symbolName) {
-        let docText = document.getText();
-        docText = docText.replace(
-          new RegExp(`^import { ${symbolName} } from .+;
-`, "m"),
-          ""
+        const sourceFilePath = document.uri.fsPath;
+        const targetFilePath = targetUri.fsPath;
+        const sourceCode = document.getText();
+        const targetCode = targetDoc.getText();
+        const { updatedSourceCode, updatedTargetCode } = updateImportsForMove(
+          sourceFilePath,
+          targetFilePath,
+          symbolName,
+          sourceCode,
+          targetCode
         );
-        const symbolUsage = new RegExp(`\\b${symbolName}\\b`, "g");
-        const isUsed = symbolUsage.test(docText);
-        if (isUsed) {
-          const origDir = path2.dirname(document.uri.fsPath);
-          let relPath = path2.relative(origDir, targetUri.fsPath).replace(/\\/g, "/").replace(/\.tsx?$/, "");
-          if (!relPath.startsWith("."))
-            relPath = "./" + relPath;
-          const importLine = `import { ${symbolName} } from '${relPath}';
-`;
-          if (!/^import \{ ${symbolName} \} from .+;/m.test(docText)) {
-            docText = insertAfterDirectivesAndComments(docText, importLine);
-          }
-          const exportLine = `export { ${symbolName} } from '${relPath}';
-`;
-          const exportRegex2 = new RegExp(`export\\s*\\{([^}]*)\\}`, "g");
-          let match;
-          let foundExport = false;
-          while ((match = exportRegex2.exec(docText)) !== null) {
-            const names = match[1].split(",").map((s) => s.trim());
-            if (names.includes(symbolName)) {
-              foundExport = true;
-              const filtered = names.filter((n) => n !== symbolName);
-              const replacement = filtered.length > 0 ? `export { ${filtered.join(", ")} }` : "";
-              docText = docText.replace(match[0], replacement);
-              docText = docText + exportLine;
-            }
-          }
-          const edit = new vscode3.WorkspaceEdit();
-          edit.replace(
-            document.uri,
-            new vscode3.Range(0, 0, document.lineCount, 0),
-            docText
-          );
-          await vscode3.workspace.applyEdit(edit);
-          await document.save();
-        }
+        const sourceEdit = new vscode3.WorkspaceEdit();
+        sourceEdit.replace(
+          document.uri,
+          new vscode3.Range(0, 0, document.lineCount, 0),
+          updatedSourceCode
+        );
+        await vscode3.workspace.applyEdit(sourceEdit);
+        const targetEdit = new vscode3.WorkspaceEdit();
+        targetEdit.replace(
+          targetUri,
+          new vscode3.Range(0, 0, targetDoc.lineCount, 0),
+          updatedTargetCode
+        );
+        await vscode3.workspace.applyEdit(targetEdit);
+        await document.save();
+        await targetDoc.save();
       }
       vscode3.window.showInformationMessage(
         `Moved symbol to ${filename}${conflict ? " (with duplicate warning)" : ""}`
@@ -397,7 +465,6 @@ function activate(context) {
   );
   context.subscriptions.push(disposable);
 }
-// Annotate the CommonJS export names for ESM import in node:
-0 && (module.exports = {
+export {
   activate
-});
+};
