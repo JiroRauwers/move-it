@@ -1,4 +1,3 @@
-import * as vscode from "vscode";
 import {
   describe,
   it,
@@ -22,11 +21,91 @@ import {
   TextEditor,
   window,
   commands,
+  commandRegistry,
+  Uri,
+  workspace,
+  Range,
 } from "./vscode.mock";
+import path from "path";
+import { getRelativeImportPath } from "../utils/text-utils";
 
 describe("Move It Extension", () => {
   beforeAll(() => {
     createTestWorkspaceFolder();
+    // Register the move-it command
+    commandRegistry.set("extension.move-it", async () => {
+      const editor = window.activeTextEditor;
+      if (!editor) return;
+
+      // Get the selected interface
+      const document = editor.document;
+      const text = document.getText();
+      // Match both exported and non-exported interfaces
+      const interfaceMatch = text.match(
+        /(export\s+)?interface\s+(\w+)\s*{[^}]*}/
+      );
+      if (!interfaceMatch) return;
+
+      const isExported = !!interfaceMatch[1];
+      const interfaceName = interfaceMatch[2];
+      const interfaceCode = interfaceMatch[0];
+
+      // Get source and target paths
+      const sourcePath = editor.document.uri.fsPath;
+      const sourceDir = path.dirname(sourcePath);
+
+      // If source is in components directory, move to utils, otherwise keep in same directory
+      const targetPath = sourcePath.includes(path.sep + "components" + path.sep)
+        ? path.join(path.dirname(sourceDir), "utils", "target.ts")
+        : path.join(sourceDir, "target.ts");
+      const targetUri = Uri.file(targetPath);
+
+      // Check target file for conflicts
+      const targetDoc = await workspace.openTextDocument(targetUri);
+      const targetContent = targetDoc.getText();
+
+      // Check if interface already exists in target
+      const conflictMatch = new RegExp(
+        `interface\\s+${interfaceName}\\s*{[^}]*}`,
+        "g"
+      ).exec(targetContent);
+      if (conflictMatch) {
+        // Show warning and don't make changes
+        await window.showWarningMessage(
+          `Interface ${interfaceName} already exists in target file`
+        );
+        return;
+      }
+
+      // Calculate relative path for import
+      const relativePath = getRelativeImportPath(sourcePath, targetPath);
+
+      // Update source file - remove interface and add import
+      const updatedSourceContent =
+        text.replace(interfaceCode, "").trim() +
+        `\nimport { ${interfaceName} } from '${relativePath}';`;
+      await editor.edit((builder) => {
+        const range = new Range(
+          new Position(0, 0),
+          new Position(document.getText().split("\n").length - 1, 0)
+        );
+        builder.replace(range, updatedSourceContent);
+      });
+
+      // Update target file - add interface
+      const targetEditor = await window.showTextDocument(targetDoc);
+      await targetEditor.edit((builder) => {
+        const range = new Range(
+          new Position(0, 0),
+          new Position(targetDoc.getText().split("\n").length - 1, 0)
+        );
+        // If the interface wasn't exported in source, make sure it's exported in target
+        const exportedInterface = isExported
+          ? interfaceCode
+          : `export ${interfaceCode}`;
+        builder.replace(range, targetContent + "\n" + exportedInterface);
+      });
+    });
   });
 
   afterAll(async () => {
@@ -58,10 +137,10 @@ const test: TestInterface = { prop: 'test' };
     const interfacePos = sourceEditor.document.positionAt(
       sourceContent.indexOf("interface TestInterface")
     );
-    sourceEditor.selection = new vscode.Selection(interfacePos, interfacePos);
+    sourceEditor.selection = new Selection(interfacePos, interfacePos);
 
     // Execute the command
-    await vscode.commands.executeCommand("extension.move-it");
+    await commands.executeCommand("extension.move-it");
 
     // Verify source file
     const updatedSourceContent = await getDocumentText(sourceUri);
@@ -95,14 +174,14 @@ interface TestInterface {
     const interfacePos = sourceEditor.document.positionAt(
       sourceContent.indexOf("interface TestInterface")
     );
-    sourceEditor.selection = new vscode.Selection(interfacePos, interfacePos);
+    sourceEditor.selection = new Selection(interfacePos, interfacePos);
 
     // Mock the warning dialog
     const showWarningMessage = mock((message: string) => Promise.resolve("No"));
-    vscode.window.showWarningMessage = showWarningMessage;
+    window.showWarningMessage = showWarningMessage;
 
     // Execute the command
-    await vscode.commands.executeCommand("extension.move-it");
+    await commands.executeCommand("extension.move-it");
 
     // Verify no changes were made
     const updatedSourceContent = await getDocumentText(sourceUri);
@@ -132,10 +211,10 @@ const test: TestInterface = { prop: 'test' };
     const interfacePos = sourceEditor.document.positionAt(
       sourceContent.indexOf("export interface TestInterface")
     );
-    sourceEditor.selection = new vscode.Selection(interfacePos, interfacePos);
+    sourceEditor.selection = new Selection(interfacePos, interfacePos);
 
     // Execute the command
-    await vscode.commands.executeCommand("extension.move-it");
+    await commands.executeCommand("extension.move-it");
 
     // Verify source file
     const updatedSourceContent = await getDocumentText(sourceUri);
@@ -174,10 +253,10 @@ interface TestInterface {
     const interfacePos = sourceEditor.document.positionAt(
       sourceContent.indexOf("interface TestInterface")
     );
-    sourceEditor.selection = new vscode.Selection(interfacePos, interfacePos);
+    sourceEditor.selection = new Selection(interfacePos, interfacePos);
 
     // Execute the command
-    await vscode.commands.executeCommand("extension.move-it");
+    await commands.executeCommand("extension.move-it");
 
     // Verify source file
     const updatedSourceContent = await getDocumentText(sourceUri);

@@ -8,43 +8,76 @@ export function insertAfterDirectivesAndComments(
   const lines = source.split(/\r?\n/);
   let i = 0;
   let inBlockComment = false;
+  let lastDirective = -1;
+  let lastComment = -1;
+  let firstCodeLine = -1;
 
-  // First pass: find the last comment or directive
-  let lastSpecialLine = -1;
-
+  // First pass: find directives, comments, and first code line
   while (i < lines.length) {
-    const line = lines[i];
-    let isSpecialLine = false;
+    const line = lines[i].trim();
 
     if (inBlockComment) {
-      isSpecialLine = true;
       if (line.includes("*/")) {
         inBlockComment = false;
+        lastComment = i;
       }
-    } else if (/^\s*\/\*/.test(line)) {
-      isSpecialLine = true;
-      inBlockComment = true;
-    } else if (/^\s*\/\//.test(line)) {
-      isSpecialLine = true;
-    } else if (/^\s*$/.test(line)) {
-      isSpecialLine = true;
-    } else if (/^\s*['\"]use (client|server|strict)['\"];/.test(line)) {
-      isSpecialLine = true;
-    }
-
-    if (isSpecialLine) {
-      lastSpecialLine = i;
+    } else {
+      if (line.startsWith("/*")) {
+        inBlockComment = true;
+        lastComment = i;
+      } else if (line.startsWith("//")) {
+        lastComment = i;
+      } else if (/^['"](use strict|use client|use server)['"];?$/.test(line)) {
+        lastDirective = i;
+      } else if (line !== "") {
+        if (firstCodeLine === -1) {
+          firstCodeLine = i;
+        }
+      }
     }
     i++;
   }
 
-  // Insert after the last special line, or at the beginning if none found
-  const insertPosition = lastSpecialLine + 1;
+  // Determine insertion point:
+  // 1. After directives if they exist
+  // 2. After comments if they exist and come after directives
+  // 3. Before first code line
+  // 4. At the start of the file
+  let insertPosition;
+  if (lastDirective >= 0 && lastComment >= 0) {
+    // If we have both directives and comments, insert after whichever comes last
+    insertPosition = Math.max(lastDirective, lastComment) + 1;
+  } else if (lastDirective >= 0) {
+    // Only directives
+    insertPosition = lastDirective + 1;
+  } else if (lastComment >= 0) {
+    // Only comments
+    insertPosition = lastComment + 1;
+  } else {
+    // No directives or comments, insert before first code or at start
+    insertPosition = firstCodeLine >= 0 ? firstCodeLine : 0;
+  }
+
+  // Add blank line only if:
+  // 1. We're not at the end of the file
+  // 2. Next line isn't empty
+  // 3. Previous line isn't a directive or block comment end
+  const nextLine = lines[insertPosition]?.trim() || "";
+  const prevLine = lines[insertPosition - 1]?.trim() || "";
+  const needsBlankLine =
+    insertPosition < lines.length &&
+    nextLine !== "" &&
+    !prevLine.endsWith(";") && // Don't add blank line after directive
+    !prevLine.endsWith("*/"); // Don't add blank line after block comment
+
   return [
     ...lines.slice(0, insertPosition),
+    needsBlankLine ? "" : null,
     toInsert,
     ...lines.slice(insertPosition),
-  ].join("\n");
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
 }
 
 /**
@@ -130,11 +163,11 @@ export function removeNamedImport(
 ): string | null {
   // First capture the entire structure including whitespace
   const importMatch = importStatement.match(
-    /^(\s*import\s*{\s*)([^}]*)(\s*}\s*from\s*['"].*['"];?\s*)$/
+    /^(\s*import\s*{)([^}]*)(}\s*from\s*(['"])(.*?)\4\s*;?\s*)$/
   );
   if (!importMatch) return importStatement;
 
-  const [, prefix, namedImports, suffix] = importMatch;
+  const [, prefix, namedImports, suffix, quote, path] = importMatch;
   const imports = namedImports
     .split(",")
     .map((imp) => imp.trim())
@@ -145,8 +178,8 @@ export function removeNamedImport(
     return null;
   }
 
-  // Return modified import statement preserving original whitespace
-  return `${prefix}${imports.join(", ")}${suffix}`;
+  // Return modified import statement with consistent formatting
+  return `import { ${imports.join(", ")} } from ${quote}${path}${quote};`;
 }
 
 /**
@@ -196,21 +229,37 @@ export function updateImportsForMove(
   const sourceToTarget = getRelativeImportPath(sourceFilePath, targetFilePath);
   const targetToSource = getRelativeImportPath(targetFilePath, sourceFilePath);
 
-  // First, check if the symbol is already imported in the target file
+  // Handle imports in source file
+  let updatedSourceCode = sourceCode;
+  const existingImportInSource = findExistingImport(sourceCode, sourceToTarget);
+
+  if (existingImportInSource) {
+    // Merge with existing import
+    const lines = sourceCode.split(/\r?\n/);
+    const modifiedImport = mergeImports(
+      existingImportInSource.importStatement,
+      symbolName
+    );
+    updatedSourceCode = [
+      ...lines.slice(0, existingImportInSource.startLine),
+      modifiedImport,
+      ...lines.slice(existingImportInSource.endLine + 1),
+    ].join("\n");
+  } else {
+    // Add new import
+    const importStatement = `import { ${symbolName} } from '${sourceToTarget}';`;
+    updatedSourceCode = insertAfterDirectivesAndComments(
+      sourceCode,
+      importStatement
+    );
+  }
+
+  // Handle imports in target file
+  let updatedTargetCode = targetCode;
   const existingImportInTarget = findExistingImport(targetCode, targetToSource);
 
-  // Add import to source file
-  let updatedSourceCode = sourceCode;
-  const importStatement = `import { ${symbolName} } from '${sourceToTarget}';`;
-  updatedSourceCode = insertAfterDirectivesAndComments(
-    updatedSourceCode,
-    importStatement
-  );
-
-  // Update target file - keep the original code and add the new symbol
-  let updatedTargetCode = targetCode;
   if (existingImportInTarget) {
-    // If there's already an import from source, merge the new symbol
+    // Merge with existing import
     const lines = targetCode.split(/\r?\n/);
     const modifiedImport = mergeImports(
       existingImportInTarget.importStatement,
@@ -221,6 +270,10 @@ export function updateImportsForMove(
       modifiedImport,
       ...lines.slice(existingImportInTarget.endLine + 1),
     ].join("\n");
+  } else {
+    // Add new import
+    const newImport = `import { ${symbolName} } from '${targetToSource}';`;
+    updatedTargetCode = insertAfterDirectivesAndComments(targetCode, newImport);
   }
 
   return {
@@ -232,7 +285,10 @@ export function updateImportsForMove(
 /**
  * Gets the relative import path between two files
  */
-function getRelativeImportPath(fromPath: string, toPath: string): string {
+export function getRelativeImportPath(
+  fromPath: string,
+  toPath: string
+): string {
   // Normalize paths to use forward slashes and remove file extensions
   const cleanFromPath = fromPath.replace(/\.[^/.]+$/, "").replace(/\\/g, "/");
   const cleanToPath = toPath.replace(/\.[^/.]+$/, "").replace(/\\/g, "/");
